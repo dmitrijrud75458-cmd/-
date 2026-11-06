@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta name="description" content="Семантический дальномер: близость смыслов, нужный уровень эмбеддингов и коридор топа для SEO. Считает в браузере.">
-<title>Семантический дальномер</title>
+<title>Семантический дальномер — 1.2</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Golos+Text:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&family=Unbounded:wght@500;700&display=swap">
@@ -297,14 +297,23 @@ button.term.add { padding: 1px 9px; font-weight: 700; }
   <header class="top">
     <div class="brand">
       <svg width="40" height="40" viewBox="0 0 40 40" aria-hidden="true"><rect x="1" y="1" width="38" height="38" rx="9" fill="var(--accent)"/><path d="M9 30 L31 30" stroke="var(--accent-ink)" stroke-width="2.4" stroke-linecap="round"/><path d="M9 30 L28 13" stroke="var(--accent-ink)" stroke-width="2.4" stroke-linecap="round"/><path d="M19 30 A10 10 0 0 0 16.6 23.6" fill="none" stroke="var(--accent-ink)" stroke-width="2" stroke-linecap="round"/><circle cx="28" cy="13" r="3" fill="var(--accent-ink)"/></svg>
-      <div><h1>Семантический дальномер</h1><p>Близость смыслов, нужный уровень эмбеддингов и коридор топа. Считает прямо в браузере.</p></div>
+      <div><h1>Семантический дальномер</h1><span class="label">Версия 1.2 · CPU / GPU</span><p>Близость смыслов, нужный уровень эмбеддингов и коридор топа. Считает прямо в браузере.</p></div>
     </div>
     <div class="top-right">
       <div class="status" id="status" role="status"><span class="dot"></span><span id="statusText">Загружаю модель…</span><span class="bar"><i id="statusBar"></i></span></div>
       <div class="engine" role="group" aria-label="Модель для эмбеддингов">
         <button type="button" data-eng="navec" aria-pressed="true">Navec<small>26 МБ · мгновенно</small></button>
         <button type="button" data-eng="e5" aria-pressed="false">e5-small<small>118 МБ · нейросеть</small></button>
-        <button type="button" data-eng="m3" aria-pressed="false">BGE-M3<small>700 МБ · точнее всех</small></button>
+        <button type="button" data-eng="m3" aria-pressed="false">BGE-M3<small>570 МБ · процессор</small></button>
+      </div>
+      <div id="bgeOptions" hidden>
+        <label class="field"><span>BGE-M3: способ вычисления</span>
+          <select id="bgeDevice">
+            <option value="wasm">Процессор — без WebGPU (около 570 МБ)</option>
+            <option value="webgpu">Видеокарта — WebGPU (700 МБ–1,25 ГБ)</option>
+          </select>
+          <small id="bgeHint">Для первого запуска загрузится отдельная версия модели. Расчёт на процессоре может занять несколько минут.</small>
+        </label>
       </div>
     </div>
   </header>
@@ -1886,6 +1895,7 @@ if (typeof module !== 'undefined') module.exports = SAMPLE;
   try { const s = JSON.parse(localStorage.getItem(LS)); if (s && s.v === 1 && s.page && s.words && s.site) S = s; } catch (e) { }
   if (!S) S = fresh();
   if (!S.engine) S.engine = 'navec';
+  if (!['wasm', 'webgpu'].includes(S.bgeDevice)) S.bgeDevice = 'wasm';
   if (S.words.ctx == null) S.words.ctx = true;
   if (!S.top) S.top = fresh().top;
   let saveT = 0;
@@ -2038,9 +2048,9 @@ if (typeof module !== 'undefined') module.exports = SAMPLE;
   }
   async function loadModel() {
     try {
-      // файлы модели ищем в папке model/, а если её нет — рядом с index.html
+      // На этом сайте файлы Navec лежат в корне. model/ остаётся запасным вариантом.
       let meta = null, base = '';
-      for (const b of ['model/', '']) {
+      for (const b of ['', 'model/']) {
         try { const r = await fetch(b + 'meta.json'); if (!r.ok) continue; meta = await r.json(); base = b; break; } catch (e) { }
       }
       if (!meta) throw new Error('не найден файл meta.json ни в папке model, ни рядом с index.html');
@@ -2104,7 +2114,8 @@ if (typeof module !== 'undefined') module.exports = SAMPLE;
   function neuralError(cfg, e) {
     const detail = String(e && e.message || e);
     let hint = '';
-    if (e && e.noGpu) hint = 'Для BGE-M3 нужен WebGPU. Откройте утилиту по HTTPS или localhost в Chrome/Edge с аппаратным ускорением либо выберите e5-small.';
+    if (e && e.noGpu) hint = 'Выберите для BGE-M3 режим «Процессор» или откройте сайт в браузере с поддержкой WebGPU.';
+    else if (/числовое исключение/.test(detail)) hint = 'Движок ONNX не вернул расшифровку ошибки. В режиме видеокарты попробуйте «Процессор»; если сбой возник на процессоре, перезагрузите страницу и попробуйте e5-small. Это не подтверждает блокировку сети.';
     else if (/memory|allocation|out of bounds|device.*lost|buffer.*size/i.test(detail)) hint = 'Не хватило памяти или произошёл сбой видеокарты. Закройте тяжёлые вкладки, перезагрузите страницу и попробуйте e5-small.';
     else if (/fetch|network|import|http|download|load.*file/i.test(detail)) hint = 'Проверьте доступ к CDN и huggingface.co, блокировщики и ограничения сети. Если это встроенный предпросмотр, откройте утилиту отдельной страницей браузера.';
     else if (/wasm|webassembly|backend|compile/i.test(detail)) hint = 'Не удалось запустить вычислительный движок. Обновите Chrome/Edge и откройте утилиту отдельной страницей по HTTPS или localhost.';
@@ -2115,7 +2126,7 @@ if (typeof module !== 'undefined') module.exports = SAMPLE;
     e5: { id: 'Xenova/multilingual-e5-small', name: 'multilingual-e5-small', short: 'e5-small', pooling: 'mean', q: 'query: ', p: 'passage: ', dims: 384, maxTokens: 512 },
     m3: { id: 'Xenova/bge-m3', name: 'BGE-M3', short: 'BGE-M3', pooling: 'cls', q: '', p: '', dims: 1024, maxTokens: 8192, gpu: true },
   };
-  // BGE-M3 считает только на видеокарте (WebGPU): на процессоре браузера одна страница заняла бы десятки минут
+  // BGE-M3 по умолчанию запускается в WASM/q8. WebGPU включается явно.
   let GPU = null;
   async function gpuInfo() {
     if (GPU) return GPU;
@@ -2130,83 +2141,130 @@ if (typeof module !== 'undefined') module.exports = SAMPLE;
   }
   function makeNeural(cfg) {
     let ext = null, loading = null, calibrated = false, base = 0, dim = cfg.dims;
+    let runtime = null, stage = 'подготовка';
     const memo = new Map();
+    const desiredDevice = () => cfg.gpu && S.bgeDevice === 'webgpu' ? 'webgpu' : 'wasm';
+    function failure(e) {
+      if (e && e.neuralStage) return e;
+      const cause = typeof e === 'number' ? 'числовое исключение ONNX ' + e : String(e && e.message || e);
+      const mode = runtime ? runtime.device + '/' + runtime.dtype : desiredDevice();
+      const err = new Error('Этап: ' + stage + '; режим: ' + mode + '; ' + cause);
+      err.neuralStage = true; err.cause = e; err.noGpu = !!(e && e.noGpu);
+      return err;
+    }
+    async function clearModel() {
+      const previous = ext; ext = null; calibrated = false; memo.clear(); base = 0;
+      if (previous && previous.dispose) await previous.dispose();
+    }
+    async function release() {
+      if (loading) { try { await loading; } catch (_) { } }
+      try { await clearModel(); } finally { loading = null; runtime = null; }
+    }
     async function run(texts, onStep) {
+      if (!ext) throw new Error('Модель ещё не загружена. Повторите расчёт.');
       const todo = [...new Set(texts.filter(t => !memo.has(t)))].sort((a, b) => a.length - b.length);
       const B = cfg.gpu ? 1 : 4;
-      for (let i = 0; i < todo.length; i += B) {
-        const batch = todo.slice(i, i + B);
-        const out = await ext(batch, { pooling: cfg.pooling, normalize: true, truncation: true, max_length: cfg.maxTokens });
-        const d = out.dims[out.dims.length - 1];
-        if (d !== cfg.dims || out.data.length !== batch.length * d || !out.data.every(Number.isFinite)) {
-          throw new Error('Модель вернула некорректные эмбеддинги.');
+      try {
+        for (let i = 0; i < todo.length; i += B) {
+          const batch = todo.slice(i, i + B);
+          const out = await ext(batch, { pooling: cfg.pooling, normalize: true, truncation: true, max_length: cfg.maxTokens });
+          const d = out.dims[out.dims.length - 1];
+          if (d !== cfg.dims || out.data.length !== batch.length * d || !out.data.every(Number.isFinite)) {
+            throw new Error('Модель вернула некорректные эмбеддинги.');
+          }
+          dim = d;
+          batch.forEach((t, j) => memo.set(t, Float32Array.from(out.data.subarray(j * d, (j + 1) * d))));
+          onStep && onStep(Math.min(i + B, todo.length), todo.length);
+          await new Promise(r => setTimeout(r, 0));
         }
-        dim = d;
-        batch.forEach((t, j) => memo.set(t, Float32Array.from(out.data.subarray(j * d, (j + 1) * d))));
-        onStep && onStep(Math.min(i + B, todo.length), todo.length);
-        await new Promise(r => setTimeout(r, 0));
+        return texts.map(t => memo.get(t));
+      } catch (e) {
+        const error = failure(e);
+        try { await clearModel(); } catch (_) { }
+        loading = null;
+        throw error;
       }
-      return texts.map(t => memo.get(t));
     }
     async function ensure(onP) {
-      if (calibrated) return;
+      if (calibrated && runtime && runtime.device === desiredDevice()) return;
       if (!loading) loading = (async () => {
-        const opts = { device: 'wasm', dtype: 'q8' };
-        if (cfg.gpu) {
+        await clearModel();
+        const opts = { device: desiredDevice(), dtype: 'q8' };
+        runtime = opts;
+        stage = 'проверка режима';
+        if (opts.device === 'webgpu') {
           const g = await gpuInfo();
           if (!g.ok) { const e = new Error('в этом браузере нет WebGPU'); e.noGpu = true; throw e; }
-          opts.device = 'webgpu'; opts.dtype = g.f16 ? 'q4f16' : 'q4';
+          opts.dtype = g.f16 ? 'q4f16' : 'q4';
         }
+        const mode = opts.device === 'wasm' ? 'процессор' : 'видеокарта';
+        stage = 'подключение библиотеки';
         onP && onP('Загружаю библиотеку нейросети…', 0);
         const T = await loadTransformers();
         const files = {};
         opts.progress_callback = p => {
           if (p.status !== 'progress' || !p.total) return;
           files[p.file] = [p.loaded, p.total];
-          const L = Object.values(files).reduce((a, f) => a + f[0], 0), Tt = Object.values(files).reduce((a, f) => a + f[1], 0);
-          onP && onP(`Загружаю ${cfg.name}… ${Math.round(L / 1048576)} из ${Math.round(Tt / 1048576)} МБ`, L / Tt);
+          const L = Object.values(files).reduce((a, f) => a + f[0], 0), total = Object.values(files).reduce((a, f) => a + f[1], 0);
+          onP && onP('Загружаю ' + cfg.name + ' (' + mode + ')… ' + Math.round(L / 1048576) + ' из ' + Math.round(total / 1048576) + ' МБ', L / total);
         };
+        stage = 'загрузка файлов и создание сессии';
+        onP && onP(cfg.name + ': создаю сессию (' + mode + ')…', 0);
         ext = await T.pipeline('feature-extraction', cfg.id, opts);
-        onP && onP(`Калибрую шкалу ${cfg.name}…`, 1);
-        const v = await run(CALIB.map(w => cfg.q + w));
-        const sims = []; for (let i = 0; i < v.length; i++) for (let j = i + 1; j < v.length; j++) { let s = 0; for (let k = 0; k < v[i].length; k++) s += v[i][k] * v[j][k]; sims.push(s); }
+        stage = 'калибровка';
+        onP && onP('Калибрую ' + cfg.name + ' (' + mode + ')…', 1);
+        const v = await run(CALIB.map(w => cfg.q + w), (i, n) => {
+          onP && onP('Калибрую ' + cfg.name + ' (' + mode + ')… ' + i + ' из ' + n, i / n);
+        });
+        const sims = [];
+        for (let i = 0; i < v.length; i++) for (let j = i + 1; j < v.length; j++) {
+          let s = 0; for (let k = 0; k < v[i].length; k++) s += v[i][k] * v[j][k]; sims.push(s);
+        }
         sims.sort((a, b) => a - b); base = sims[sims.length >> 1];
         if (!Number.isFinite(base) || base >= 1) throw new Error('Не удалось откалибровать модель.');
-        calibrated = true;
+        calibrated = true; stage = 'расчёт эмбеддингов';
       })();
-      try { await loading; } catch (e) {
-        const failed = ext; ext = null; calibrated = false; memo.clear(); base = 0;
-        try { if (failed && failed.dispose) await failed.dispose(); } catch (_) { }
-        loading = null; throw e;
-      }
+      try { await loading; }
+      catch (e) {
+        const error = failure(e);
+        try { await clearModel(); } catch (_) { }
+        throw error;
+      } finally { loading = null; }
     }
     const dummy = () => new Float32Array(dim).fill(1 / Math.sqrt(dim));
-    return { cfg, ensure, run, dummy, ready: () => calibrated, base: () => base };
+    return { cfg, ensure, run, release, dummy, ready: () => calibrated, base: () => base,
+      mode: () => runtime ? runtime.device + '/' + runtime.dtype : null };
   }
   const NEURAL = { e5: makeNeural(MODELS.e5), m3: makeNeural(MODELS.m3) };
   let lastNeural = 'e5';
   function engineLabel(e, m) { return e === 'neural' ? 'нейросеть ' + (MODELS[m || lastNeural] || MODELS.e5).name : 'Navec (векторы слов)'; }
   function setEngineButtons() {
     document.querySelectorAll('.engine button').forEach(b => b.setAttribute('aria-pressed', b.dataset.eng === S.engine));
+    $('#bgeOptions').hidden = S.engine !== 'm3';
+    $('#bgeDevice').value = S.bgeDevice;
+    const small = document.querySelector('.engine button[data-eng="m3"] small');
+    if (small) small.textContent = S.bgeDevice === 'wasm' ? '570 МБ · процессор' : '700 МБ–1,25 ГБ · WebGPU';
   }
   function readyText() {
     const inf = Engine.info();
-    const loaded = Object.values(NEURAL).filter(n => n.ready()).map(n => n.cfg.short);
+    const loaded = Object.values(NEURAL).filter(n => n.ready()).map(n => n.cfg.short + ' (' + n.mode() + ')');
     return `Модель готова: ${Math.round(inf.words / 1000)} тыс. слов · ${inf.dims} измерений${loaded.length ? ' · загружена ' + loaded.join(' и ') : ''} · всё считается у вас`;
   }
-  // кнопка BGE-M3: размер и доступность зависят от видеокарты
   gpuInfo().then(g => {
-    const b = document.querySelector('.engine button[data-eng="m3"]'); if (!b) return;
-    const sm = b.querySelector('small');
-    if (!g.ok) {
-      b.disabled = true; b.classList.add('na');
-      b.title = 'Нужна видеокарта через WebGPU: откройте в свежем Chrome или Edge на компьютере';
-      if (sm) sm.textContent = 'нужен WebGPU';
-      if (S.engine === 'm3') { S.engine = 'e5'; setEngineButtons(); save(); }
-    } else {
-      if (sm) sm.textContent = (g.f16 ? '700 МБ' : '1,25 ГБ') + ' · точнее всех';
-      b.title = 'BGE-M3: лучшая из трёх моделей на русском, считает на видеокарте';
-    }
+    $('#bgeDevice option[value="webgpu"]').disabled = !g.ok;
+    if (!g.ok && S.bgeDevice === 'webgpu') { S.bgeDevice = 'wasm'; save(); }
+    setEngineButtons();
+  });
+  $('#bgeDevice').addEventListener('change', async e => {
+    if (running) { e.target.value = S.bgeDevice; return; }
+    if (!beginRun()) return;
+    try {
+      await NEURAL.m3.release();
+      S.bgeDevice = e.target.value === 'webgpu' ? 'webgpu' : 'wasm';
+      invalidateResults(); setEngineButtons(); save();
+    } catch (error) { setStatus('err', 'Не удалось освободить модель. Обновите страницу.', 0); }
+    finally { endRun(); }
+    if (S.engine === 'm3') showTab(S.tab);
   });
   // Один расчёт за раз: provider и контекст общие для всех вкладок.
   let running = false;
@@ -2222,12 +2280,13 @@ if (typeof module !== 'undefined') module.exports = SAMPLE;
   function endRun() {
     lockedControls.forEach(([el, disabled]) => { el.disabled = disabled; });
     lockedControls = []; running = false;
-    if (GPU && !GPU.ok) document.querySelector('.engine button[data-eng="m3"]').disabled = true;
+    if (GPU && !GPU.ok) $('#bgeDevice option[value="webgpu"]').disabled = true;
   }
   async function compute(fn) {
     const selected = S.engine, N = NEURAL[selected];
-    if (!N) { Engine.setProvider(null); const r = fn(); setStatus('ready', readyText(), 1); return r; }
+    if (!N) { for (const other of Object.values(NEURAL)) await other.release(); Engine.setProvider(null); const r = fn(); setStatus('ready', readyText(), 1); return r; }
     try {
+      for (const other of Object.values(NEURAL)) if (other !== N) await other.release();
       await N.ensure((t, f) => setStatus('load', t, f));
       lastNeural = selected;
       const dummy = N.dummy(), base = N.base(), cache = new Map();
@@ -2244,7 +2303,7 @@ if (typeof module !== 'undefined') module.exports = SAMPLE;
         let result;
         try { result = fn(); } finally { Engine.setProvider(null); }
         if (!missing.size) {
-          if (result && typeof result === 'object') result.model = selected;
+          if (result && typeof result === 'object') { result.model = selected; result.runtime = N.mode(); }
           setStatus('ready', readyText(), 1);
           return result;
         }
@@ -2260,15 +2319,18 @@ if (typeof module !== 'undefined') module.exports = SAMPLE;
       throw new Error(message);
     } finally { Engine.setProvider(null); }
   }
-  document.querySelector('.engine').addEventListener('click', e => {
-    const b = e.target.closest('button[data-eng]');
-    if (!b || b.disabled || running || b.dataset.eng === S.engine) return;
-    S.engine = b.dataset.eng; setEngineButtons(); save();
+  function invalidateResults() {
     done.page = done.top = done.words = done.site = false;
     lastPage = lastTop = lastWords = lastSite = null;
     ['pageOut', 'topOut', 'wordsOut', 'siteOut'].forEach(id => {
       $('#' + id).innerHTML = '<div class="empty">Модель изменена. Выполните расчёт.</div>';
     });
+  }
+  document.querySelector('.engine').addEventListener('click', e => {
+    const b = e.target.closest('button[data-eng]');
+    if (!b || b.disabled || running || b.dataset.eng === S.engine) return;
+    S.engine = b.dataset.eng; setEngineButtons(); save();
+    invalidateResults();
     if (Engine.ready()) showTab(S.tab);
   });
 
@@ -2962,7 +3024,7 @@ if (typeof module !== 'undefined') module.exports = SAMPLE;
         <li>Незнакомые слова ищутся по основе (стеммер Snowball), по приставке и по началу слова. Аббревиатуры лучше объяснить в словаре ниши.</li></ul>
         <p class="muted">Navec не трансформер: контекст она понимает грубее, зато мгновенна. Смотрите на соотношения внутри набора, а не на абсолютные числа.</p>
         <p><b>Нейросеть multilingual-e5-small</b> (intfloat, MIT; ONNX-версия Xenova) запускается через Transformers.js прямо в браузере. 384 измерения, до 512 токенов на текст, раздельные префиксы «query:» и «passage:», как RETRIEVAL_QUERY и RETRIEVAL_DOCUMENT у Google. Скачивается один раз (118 МБ) и кэшируется браузером. Её косинусы сжаты к единице, поэтому все пороги сервис пересчитывает от «фона» — медианы близости случайных слов.</p>
-        <p><b>Нейросеть BGE-M3</b> (BAAI, MIT; ONNX-версия Xenova) — самая точная из трёх для русского. 1024 измерения, до 8192 токенов, без префиксов. На русском бенчмарке ruMTEB поиск — 74,8 против 65,9 у e5-small, средний балл — 61,6 против 57,3. Считает на видеокарте через WebGPU: 4-битная версия весит 700 МБ (1,25 ГБ, если видеокарта не умеет fp16), скачивается один раз и кэшируется. Без WebGPU кнопка недоступна: на процессоре браузера модель такого размера считала бы страницу десятки минут.</p></div></div>
+        <p><b>Нейросеть BGE-M3</b> (BAAI, MIT; ONNX-версия Xenova) — самая точная из трёх для русского. 1024 измерения, до 8192 токенов, без префиксов. На русском бенчмарке ruMTEB поиск — 74,8 против 65,9 у e5-small, средний балл — 61,6 против 57,3. По умолчанию запускается на процессоре через WASM/q8: веса занимают около 570 МБ. Этот режим не требует WebGPU, но расчёт может занять несколько минут. В настройке BGE-M3 можно выбрать видеокарту: 4-битная версия занимает около 700 МБ при поддержке fp16 или 1,25 ГБ без неё. Разные варианты весов скачиваются и кэшируются отдельно.</p></div></div>
     </div>
 
     <div class="panel"><div class="head"><h2>Источники метрик</h2></div><div class="prose small"><ul>
