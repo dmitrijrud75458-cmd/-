@@ -2068,16 +2068,52 @@ if (typeof module !== 'undefined') module.exports = SAMPLE;
       showTab(S.tab);
     } catch (e) {
       console.error(e);
-      setStatus('err', 'Модель не загрузилась: ' + e.message + '. Обновите страницу.', 0);
+      const hint = location.protocol === 'file:'
+        ? ' Откройте папку утилиты через локальный HTTP-сервер (localhost), а не двойным щелчком по HTML.'
+        : ' Проверьте, что рядом с HTML сохранена исходная папка model с meta.json и файлами Navec.';
+      setStatus('err', 'Navec не загрузилась: ' + e.message + '.' + hint, 0);
     }
   }
 
   // ---------- нейросети в браузере: multilingual-e5-small и BGE-M3 ----------
-  const TJS = 'https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.8.1';
+  // Полный путь к самодостаточной браузерной сборке; transformers.web.js требует bundler.
+  const TJS_SOURCES = [
+    'https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.8.1/dist/',
+    'https://unpkg.com/@huggingface/transformers@3.8.1/dist/'
+  ];
+  let libraryPromise = null;
+  async function loadTransformers() {
+    if (!libraryPromise) libraryPromise = (async () => {
+      const errors = [];
+      for (const base of TJS_SOURCES) {
+        try {
+          const T = await import(base + 'transformers.min.js');
+          T.env.allowLocalModels = false;
+          // Работает без COOP/COEP и SharedArrayBuffer, в том числе на обычном статическом хостинге.
+          T.env.backends.onnx.wasm.numThreads = 1;
+          T.env.backends.onnx.wasm.proxy = false;
+          T.env.backends.onnx.wasm.wasmPaths = base;
+          return T;
+        } catch (e) { errors.push(base + ': ' + (e.message || e)); }
+      }
+      throw new Error('Не удалось подключить Transformers.js. ' + errors.join(' | '));
+    })();
+    try { return await libraryPromise; }
+    catch (e) { libraryPromise = null; throw e; }
+  }
+  function neuralError(cfg, e) {
+    const detail = String(e && e.message || e);
+    let hint = '';
+    if (e && e.noGpu) hint = 'Для BGE-M3 нужен WebGPU. Откройте утилиту по HTTPS или localhost в Chrome/Edge с аппаратным ускорением либо выберите e5-small.';
+    else if (/memory|allocation|out of bounds|device.*lost|buffer.*size/i.test(detail)) hint = 'Не хватило памяти или произошёл сбой видеокарты. Закройте тяжёлые вкладки, перезагрузите страницу и попробуйте e5-small.';
+    else if (/fetch|network|import|http|download|load.*file/i.test(detail)) hint = 'Проверьте доступ к CDN и huggingface.co, блокировщики и ограничения сети. Если это встроенный предпросмотр, откройте утилиту отдельной страницей браузера.';
+    else if (/wasm|webassembly|backend|compile/i.test(detail)) hint = 'Не удалось запустить вычислительный движок. Обновите Chrome/Edge и откройте утилиту отдельной страницей по HTTPS или localhost.';
+    return cfg.name + ': расчёт не выполнен. ' + hint + ' Причина: ' + detail + ' Можно повторить расчёт или выбрать другую модель.';
+  }
   const CALIB = 'кошка бюджет река компьютер песня вилка закон облако стул футбол врач хлеб поезд зеркало налог лес телефон молоко гитара кирпич звезда письмо сахар ремонт остров учитель обувь вирус картина мост пенсия огурец лампа ветер шахматы банк кофе двигатель соль театр'.split(' ');
   const MODELS = {
-    e5: { id: 'Xenova/multilingual-e5-small', name: 'multilingual-e5-small', short: 'e5-small', pooling: 'mean', q: 'query: ', p: 'passage: ', dims: 384 },
-    m3: { id: 'Xenova/bge-m3', name: 'BGE-M3', short: 'BGE-M3', pooling: 'cls', q: '', p: '', dims: 1024, gpu: true },
+    e5: { id: 'Xenova/multilingual-e5-small', name: 'multilingual-e5-small', short: 'e5-small', pooling: 'mean', q: 'query: ', p: 'passage: ', dims: 384, maxTokens: 512 },
+    m3: { id: 'Xenova/bge-m3', name: 'BGE-M3', short: 'BGE-M3', pooling: 'cls', q: '', p: '', dims: 1024, maxTokens: 8192, gpu: true },
   };
   // BGE-M3 считает только на видеокарте (WebGPU): на процессоре браузера одна страница заняла бы десятки минут
   let GPU = null;
@@ -2093,15 +2129,19 @@ if (typeof module !== 'undefined') module.exports = SAMPLE;
     return GPU;
   }
   function makeNeural(cfg) {
-    let ext = null, loading = null, base = 0, dim = cfg.dims;
+    let ext = null, loading = null, calibrated = false, base = 0, dim = cfg.dims;
     const memo = new Map();
     async function run(texts, onStep) {
       const todo = [...new Set(texts.filter(t => !memo.has(t)))].sort((a, b) => a.length - b.length);
-      const B = cfg.gpu ? 4 : 8;
+      const B = cfg.gpu ? 1 : 4;
       for (let i = 0; i < todo.length; i += B) {
         const batch = todo.slice(i, i + B);
-        const out = await ext(batch, { pooling: cfg.pooling, normalize: true });
-        const d = out.dims[out.dims.length - 1]; dim = d;
+        const out = await ext(batch, { pooling: cfg.pooling, normalize: true, truncation: true, max_length: cfg.maxTokens });
+        const d = out.dims[out.dims.length - 1];
+        if (d !== cfg.dims || out.data.length !== batch.length * d || !out.data.every(Number.isFinite)) {
+          throw new Error('Модель вернула некорректные эмбеддинги.');
+        }
+        dim = d;
         batch.forEach((t, j) => memo.set(t, Float32Array.from(out.data.subarray(j * d, (j + 1) * d))));
         onStep && onStep(Math.min(i + B, todo.length), todo.length);
         await new Promise(r => setTimeout(r, 0));
@@ -2109,17 +2149,16 @@ if (typeof module !== 'undefined') module.exports = SAMPLE;
       return texts.map(t => memo.get(t));
     }
     async function ensure(onP) {
-      if (ext) return;
+      if (calibrated) return;
       if (!loading) loading = (async () => {
-        const opts = { dtype: 'q8' };
+        const opts = { device: 'wasm', dtype: 'q8' };
         if (cfg.gpu) {
           const g = await gpuInfo();
           if (!g.ok) { const e = new Error('в этом браузере нет WebGPU'); e.noGpu = true; throw e; }
           opts.device = 'webgpu'; opts.dtype = g.f16 ? 'q4f16' : 'q4';
         }
         onP && onP('Загружаю библиотеку нейросети…', 0);
-        const T = await import(TJS);
-        T.env.allowLocalModels = false;
+        const T = await loadTransformers();
         const files = {};
         opts.progress_callback = p => {
           if (p.status !== 'progress' || !p.total) return;
@@ -2132,11 +2171,17 @@ if (typeof module !== 'undefined') module.exports = SAMPLE;
         const v = await run(CALIB.map(w => cfg.q + w));
         const sims = []; for (let i = 0; i < v.length; i++) for (let j = i + 1; j < v.length; j++) { let s = 0; for (let k = 0; k < v[i].length; k++) s += v[i][k] * v[j][k]; sims.push(s); }
         sims.sort((a, b) => a - b); base = sims[sims.length >> 1];
+        if (!Number.isFinite(base) || base >= 1) throw new Error('Не удалось откалибровать модель.');
+        calibrated = true;
       })();
-      try { await loading; } catch (e) { loading = null; ext = null; throw e; }
+      try { await loading; } catch (e) {
+        const failed = ext; ext = null; calibrated = false; memo.clear(); base = 0;
+        try { if (failed && failed.dispose) await failed.dispose(); } catch (_) { }
+        loading = null; throw e;
+      }
     }
     const dummy = () => new Float32Array(dim).fill(1 / Math.sqrt(dim));
-    return { cfg, ensure, run, dummy, ready: () => !!ext, base: () => base };
+    return { cfg, ensure, run, dummy, ready: () => calibrated, base: () => base };
   }
   const NEURAL = { e5: makeNeural(MODELS.e5), m3: makeNeural(MODELS.m3) };
   let lastNeural = 'e5';
@@ -2157,46 +2202,74 @@ if (typeof module !== 'undefined') module.exports = SAMPLE;
       b.disabled = true; b.classList.add('na');
       b.title = 'Нужна видеокарта через WebGPU: откройте в свежем Chrome или Edge на компьютере';
       if (sm) sm.textContent = 'нужен WebGPU';
-      if (S.engine === 'm3') { S.engine = 'navec'; setEngineButtons(); save(); }
+      if (S.engine === 'm3') { S.engine = 'e5'; setEngineButtons(); save(); }
     } else {
       if (sm) sm.textContent = (g.f16 ? '700 МБ' : '1,25 ГБ') + ' · точнее всех';
       b.title = 'BGE-M3: лучшая из трёх моделей на русском, считает на видеокарте';
     }
   });
-  // двухпроходный расчёт: сначала собираем все тексты, которые нужны анализу, потом кодируем их нейросетью пачкой
+  // Один расчёт за раз: provider и контекст общие для всех вкладок.
+  let running = false;
+  let lockedControls = [];
+  function beginRun() {
+    if (!Engine.ready() || running) return false;
+    running = true;
+    lockedControls = [...document.querySelectorAll('.wrap button, .wrap input, .wrap textarea, .wrap select')]
+      .map(el => [el, el.disabled]);
+    lockedControls.forEach(([el]) => { el.disabled = true; });
+    return true;
+  }
+  function endRun() {
+    lockedControls.forEach(([el, disabled]) => { el.disabled = disabled; });
+    lockedControls = []; running = false;
+    if (GPU && !GPU.ok) document.querySelector('.engine button[data-eng="m3"]').disabled = true;
+  }
   async function compute(fn) {
-    const N = NEURAL[S.engine];
-    if (!N) return fn();
+    const selected = S.engine, N = NEURAL[selected];
+    if (!N) { Engine.setProvider(null); const r = fn(); setStatus('ready', readyText(), 1); return r; }
     try {
       await N.ensure((t, f) => setStatus('load', t, f));
+      lastNeural = selected;
+      const dummy = N.dummy(), base = N.base(), cache = new Map();
+      const key = (kind, text) => (kind === 'query' ? N.cfg.q : N.cfg.p) + text;
+      // Состав запросов может зависеть от уже вычисленной близости. Догружаем их до стабилизации.
+      // Временные векторы используются только для сбора запросов и никогда не попадают в отчёт.
+      for (let pass = 0; pass < 12; pass++) {
+        const missing = new Set();
+        Engine.setProvider((kind, text) => {
+          const k = key(kind, text);
+          if (cache.has(k)) return cache.get(k);
+          missing.add(k); return dummy;
+        }, base);
+        let result;
+        try { result = fn(); } finally { Engine.setProvider(null); }
+        if (!missing.size) {
+          if (result && typeof result === 'object') result.model = selected;
+          setStatus('ready', readyText(), 1);
+          return result;
+        }
+        const keys = [...missing];
+        const vecs = await N.run(keys, (i, n) => setStatus('load', N.cfg.name + ' кодирует тексты… ' + i + ' из ' + n, i / n));
+        keys.forEach((k, i) => cache.set(k, vecs[i]));
+      }
+      throw new Error('Список текстов для анализа не стабилизировался. Уменьшите объём входных данных.');
     } catch (e) {
       console.error(e);
-      const was = N.cfg.name;
-      S.engine = 'navec'; setEngineButtons(); save();
-      setStatus('ready', readyText(), 1);
-      toast(was + ' не загрузилась, считаю на Navec');
-      if (e && e.noGpu) throw new Error(was + ' работает только с видеокартой через WebGPU, а в этом браузере его нет. Откройте сайт в свежем Chrome или Edge на компьютере или выберите e5. Нажмите «Измерить», чтобы посчитать на Navec.');
-      throw new Error(was + ' не загрузилась: ' + (e && e.message ? e.message : e) + '. В песочнице Claude внешние модели закрыты, нейросети работают в версии на GitHub Pages. Нажмите «Измерить», чтобы посчитать на Navec.');
-    }
-    lastNeural = S.engine;
-    const req = new Map(), dummy = N.dummy(), base = N.base();
-    const key = (kind, text) => (kind === 'query' ? N.cfg.q : N.cfg.p) + text;
-    Engine.setProvider((kind, text) => { req.set(key(kind, text), 1); return dummy; }, base);
-    try { fn(); } catch (e) { console.warn('dry run', e); }
-    Engine.setProvider(null);
-    const keys = [...req.keys()];
-    await N.run(keys, (i, n) => setStatus('load', `${N.cfg.name} кодирует тексты… ${i} из ${n}`, i / n));
-    const vecs = await N.run(keys);
-    const cache = new Map(keys.map((k, i) => [k, vecs[i]]));
-    Engine.setProvider((kind, text) => cache.get(key(kind, text)) || dummy, base);
-    try { const res = fn(); if (res && typeof res === 'object') res.model = lastNeural; return res; }
-    finally { Engine.setProvider(null); setStatus('ready', readyText(), 1); }
+      const message = neuralError(N.cfg, e);
+      setStatus('err', N.cfg.name + ': ошибка. Подробности под формой.', 0);
+      throw new Error(message);
+    } finally { Engine.setProvider(null); }
   }
   document.querySelector('.engine').addEventListener('click', e => {
-    const b = e.target.closest('button[data-eng]'); if (!b || b.dataset.eng === S.engine) return;
+    const b = e.target.closest('button[data-eng]');
+    if (!b || b.disabled || running || b.dataset.eng === S.engine) return;
     S.engine = b.dataset.eng; setEngineButtons(); save();
-    done.page = done.words = done.site = false;
-    if (Engine.ready()) { if (S.tab === 'page') runPage(); else if (S.tab === 'words') runWords(); else if (S.tab === 'site') runSite(); }
+    done.page = done.top = done.words = done.site = false;
+    lastPage = lastTop = lastWords = lastSite = null;
+    ['pageOut', 'topOut', 'wordsOut', 'siteOut'].forEach(id => {
+      $('#' + id).innerHTML = '<div class="empty">Модель изменена. Выполните расчёт.</div>';
+    });
+    if (Engine.ready()) showTab(S.tab);
   });
 
   // ---------- графика ----------
@@ -2234,10 +2307,12 @@ if (typeof module !== 'undefined') module.exports = SAMPLE;
   let lastPage = null;
   const LEVEL_TAG = { 'слово': 'слово', 'фраза': 'фраза', 'блок': 'блок', 'документ': 'документ', 'гибрид': 'гибрид', 'gist': 'GIST' };
   async function runPage() {
-    if (!Engine.ready()) return;
+    if (!beginRun()) return;
+    lastPage = null; done.page = false;
     const out = $('#pageOut'); const btn = $('#runPage');
-    btn.disabled = true; btn.textContent = 'Считаю…'; out.classList.add('working'); await frame();
+    btn.disabled = true; btn.textContent = 'Считаю…'; out.classList.add('working');
     try {
+      await frame();
       Engine.setOverrides(S.niche);
       const pages = S.page.docs.filter(d => (d.raw || '').trim());
       if (!S.page.q.trim()) throw new Error('Введите главный запрос.');
@@ -2245,7 +2320,7 @@ if (typeof module !== 'undefined') module.exports = SAMPLE;
       const r = await compute(() => Engine.analyzePages({ query: S.page.q, subqueries: S.page.subs.split('\n'), pages }));
       lastPage = r; done.page = true; renderPage(r);
     } catch (e) { console.error(e); out.innerHTML = `<div class="empty">${esc(e.message || 'Не получилось посчитать.')}</div>`; }
-    out.classList.remove('working'); btn.disabled = false; btn.textContent = 'Измерить';
+    finally { out.classList.remove('working'); endRun(); btn.textContent = 'Измерить'; }
   }
   $('#runPage').addEventListener('click', runPage);
   $('#pageOut').addEventListener('click', e => { const b = e.target.closest('button[data-jump]'); if (!b) return; const t = document.getElementById(b.dataset.jump); if (t) t.scrollIntoView({ behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth', block: 'start' }); });
@@ -2334,7 +2409,7 @@ if (typeof module !== 'undefined') module.exports = SAMPLE;
     h += `<div class="panel" id="sec-dims"><div class="head"><h2>Какая размерность эмбеддинга нужна</h2><p>Как в Matryoshka-эмбеддингах Google: обрезаем вектор до первых N измерений, перенормируем и смотрим, меняется ли ранжирование блоков.</p></div>
       <div class="grid-res"><div>${lineChart(dimPts, { yLabel: 'Стабильность ранжирования', mark: r.enough.d })}<div class="legend"><span><i></i>корреляция Спирмена с полной версией</span><span><i class="b"></i>совпадение топ-5 блоков</span></div></div>
       <div class="prose"><p>Для этого набора ранжирование блоков устойчиво с <b class="num">${r.enough.d}</b> измерений из ${r.dimStudy[r.dimStudy.length - 1].d}: корреляция ${fmt(r.enough.rho, 'f2')}, топ-5 совпадает на ${fmt(r.enough.top5, 'pct')}.</p>
-      <p class="muted small">Ориентиры: Gemini Embedding рекомендует 768, 1536 или 3072 измерения, качество на MTEB почти не падает до 768 (67,99 против 68,16 у 2048). Yandex Text Embeddings v2 для документов отдаёт 128, 256, 512 или 768. ${r.engine === 'neural' ? 'Нейросеть ' + (MODELS[r.model] || MODELS.e5).name + ' не обучалась под усечение, поэтому кривая показывает, сколько смысла теряется в её 384 измерениях без перенормировки обучением.' : 'Navec компактнее: её 192 измерения упорядочены по важности, поэтому усечение работает так же.'}</p></div></div></div>`;
+      <p class="muted small">Ориентиры: Gemini Embedding рекомендует 768, 1536 или 3072 измерения, качество на MTEB почти не падает до 768 (67,99 против 68,16 у 2048). Yandex Text Embeddings v2 для документов отдаёт 128, 256, 512 или 768. ${r.engine === 'neural' ? 'Нейросеть ' + (MODELS[r.model] || MODELS.e5).name + ' не обучалась под усечение, поэтому кривая показывает, сколько смысла теряется в её ' + (MODELS[r.model] || MODELS.e5).dims + ' измерениях без перенормировки обучением.' : 'Navec компактнее: её 192 измерения упорядочены по важности, поэтому усечение работает так же.'}</p></div></div></div>`;
 
     // все метрики
     h += `<details class="panel"><summary style="cursor:pointer;font-weight:700">Все показания по страницам</summary><div class="tbl-wrap" style="margin-top:var(--s4)"><table><thead><tr><th>Метрика</th>${ordered.map(p => `<th class="n">${esc(p.label)}</th>`).join('')}</tr></thead><tbody>`;
@@ -2516,10 +2591,12 @@ if (typeof module !== 'undefined') module.exports = SAMPLE;
   // ---------- анализ топа ----------
   let lastTop = null;
   async function runTop() {
-    if (!Engine.ready()) return;
+    if (!beginRun()) return;
+    lastTop = null; done.top = false;
     const out = $('#topOut'), btn = $('#runTop');
-    btn.disabled = true; btn.textContent = 'Считаю…'; out.classList.add('working'); await frame();
+    btn.disabled = true; btn.textContent = 'Считаю…'; out.classList.add('working');
     try {
+      await frame();
       Engine.setOverrides(S.niche);
       const pages = S.top.docs.filter(d => (d.raw || '').trim());
       if (!S.top.q.trim()) throw new Error('Введите главный запрос.');
@@ -2527,7 +2604,7 @@ if (typeof module !== 'undefined') module.exports = SAMPLE;
       lastTop = await compute(() => Engine.analyzeTop({ query: S.top.q, subqueries: S.top.subs.split('\n'), pages }));
       done.top = true; renderTop(lastTop);
     } catch (e) { console.error(e); out.innerHTML = `<div class="empty">${esc(e.message || 'Не получилось посчитать.')}</div>`; }
-    out.classList.remove('working'); btn.disabled = false; btn.textContent = 'Измерить';
+    finally { out.classList.remove('working'); endRun(); btn.textContent = 'Измерить'; }
   }
   $('#runTop').addEventListener('click', runTop);
   function topReport(r) {
@@ -2615,17 +2692,19 @@ if (typeof module !== 'undefined') module.exports = SAMPLE;
   let lastWords = null;
   const SRC = { ctx: 'по контексту ваших текстов', neural: 'нейросеть', exact: 'в словаре', stem: 'по основе', compound: 'составное слово', prefix: 'по началу слова', niche: 'словарь ниши', partial: 'фраза, не все слова', oov: 'нет в модели' };
   async function runWords() {
-    if (!Engine.ready()) return;
+    if (!beginRun()) return;
+    lastWords = null; done.words = false;
     const out = $('#wordsOut'), btn = $('#runWords');
-    btn.disabled = true; btn.textContent = 'Считаю…'; out.classList.add('working'); await frame();
+    btn.disabled = true; btn.textContent = 'Считаю…'; out.classList.add('working');
     try {
+      await frame();
       Engine.setOverrides(S.niche);
       if (!S.words.anchor.trim()) throw new Error('Введите ключ.');
       const ctxRaws = S.words.ctx ? [...S.page.docs, ...((S.top && S.top.docs) || [])].map(d => d.raw || '') : null;
       const r = await compute(() => Engine.analyzeWords({ anchor: S.words.anchor, terms: S.words.terms.split('\n'), clusterThr: S.words.thr, includeRare: S.words.rare, ctxRaws }));
       lastWords = r; done.words = true; renderWords(r);
     } catch (e) { console.error(e); out.innerHTML = `<div class="empty">${esc(e.message || 'Не получилось посчитать.')}</div>`; }
-    out.classList.remove('working'); btn.disabled = false; btn.textContent = 'Измерить';
+    finally { out.classList.remove('working'); endRun(); btn.textContent = 'Измерить'; }
   }
   $('#runWords').addEventListener('click', runWords);
   function renderWords(r) {
@@ -2711,16 +2790,18 @@ if (typeof module !== 'undefined') module.exports = SAMPLE;
   // ---------- страницы сайта ----------
   let lastSite = null;
   async function runSite() {
-    if (!Engine.ready()) return;
+    if (!beginRun()) return;
+    lastSite = null; done.site = false;
     const out = $('#siteOut'), btn = $('#runSite');
-    btn.disabled = true; btn.textContent = 'Считаю…'; out.classList.add('working'); await frame();
+    btn.disabled = true; btn.textContent = 'Считаю…'; out.classList.add('working');
     try {
+      await frame();
       Engine.setOverrides(S.niche);
       const pages = S.site.docs.filter(d => (d.raw || '').trim());
       if (pages.length < 2) throw new Error('Нужно минимум две страницы с текстом.');
       lastSite = await compute(() => Engine.comparePages(pages)); done.site = true; renderSite(lastSite);
     } catch (e) { console.error(e); out.innerHTML = `<div class="empty">${esc(e.message || 'Не получилось посчитать.')}</div>`; }
-    out.classList.remove('working'); btn.disabled = false; btn.textContent = 'Измерить';
+    finally { out.classList.remove('working'); endRun(); btn.textContent = 'Измерить'; }
   }
   $('#runSite').addEventListener('click', runSite);
   function siteReport(r) {
